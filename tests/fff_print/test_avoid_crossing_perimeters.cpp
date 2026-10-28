@@ -1,15 +1,23 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "test_data.hpp"
-#include "libslic3r/GCodeReader.hpp"
+#include "Slic3r/Biz/GCodeReader/GCodeReader.hpp"
 
 using namespace Slic3r;
+using Biz::GCodeReader::GCodeReader;
+using Domain::BrimType;
+using Domain::FloatOrPercentage;
+using Domain::Percentage;
+using Domain::TriangleMesh;
 
 SCENARIO("Avoid crossing perimeters", "[AvoidCrossingPerimeters]") {
-    WHEN("Two 20mm cubes sliced") {
+	WHEN("Two 20mm cubes sliced") {
+        Test::TestConfig config;
+        config.print.items.opt("avoid_crossing_perimeters").set(true);
         std::string gcode = Slic3r::Test::slice(
             { Slic3r::Test::TestMesh::cube_20x20x20, Slic3r::Test::TestMesh::cube_20x20x20 },
-            { { "avoid_crossing_perimeters", true } });
+            config
+        );
         THEN("gcode not empty") {
             REQUIRE(! gcode.empty());
         }
@@ -18,27 +26,28 @@ SCENARIO("Avoid crossing perimeters", "[AvoidCrossingPerimeters]") {
 
 SCENARIO("Minimize travel over printed areas", "[PrintedAreaTravel]") {
     WHEN("A travel can follow a printed boundary") {
-        const auto config = Slic3r::DynamicPrintConfig::full_print_config_with(
-            {{"perimeters", 3}, {"fill_density", 15}, {"skirts", 0},
-             {"layer_height", 0.4}, {"first_layer_height", 0.4}}
-        );
+        Test::TestConfig direct_config;
+        direct_config.print.items.opt("perimeters").set(3);
+        direct_config.print.items.opt("fill_density").set(Percentage{15});
+        direct_config.print.items.opt("skirts").set(0);
+        direct_config.print.items.opt("layer_height").set(0.4);
+        direct_config.print.items.opt("first_layer_height").set(FloatOrPercentage{0.4});
         const TriangleMesh test_mesh = Slic3r::Test::mesh(
             Slic3r::Test::TestMesh::cube_with_hole, Vec3d::Zero(), Vec3d(1., 1., 0.08));
         std::string direct_gcode =
-            Slic3r::Test::slice({test_mesh}, config);
+            Slic3r::Test::slice({test_mesh}, direct_config);
 
-        auto minimized_config = config;
-        minimized_config
-            .set_key_value("avoid_crossing_printed_areas", new Slic3r::ConfigOptionBool(true));
+        auto minimized_config = direct_config;
+        minimized_config.print.items.opt("avoid_crossing_printed_areas").set(true);
         std::string minimized_gcode =
             Slic3r::Test::slice({test_mesh}, minimized_config);
 
         auto xy_travel_segments = [](const std::string &gcode) {
             size_t segments = 0;
-            Slic3r::GCodeReader parser;
+            GCodeReader parser;
             parser.parse_buffer(
                 gcode,
-                [&segments](Slic3r::GCodeReader &reader, const Slic3r::GCodeReader::GCodeLine &line) {
+                [&segments](GCodeReader &reader, const GCodeReader::GCodeLine &line) {
                     if (!line.extruding(reader) && line.dist_XY(reader) > 0.)
                         ++segments;
                 }
@@ -53,8 +62,7 @@ SCENARIO("Minimize travel over printed areas", "[PrintedAreaTravel]") {
 
         THEN("an unavoidable fresh crossing cools before the next layer") {
             auto fallback_config = minimized_config;
-            fallback_config.set_deserialize_strict(
-                {{"avoid_crossing_perimeters_max_detour", 0.01}});
+            fallback_config.print.items.opt("avoid_crossing_perimeters_max_detour").set(0.01);
             const std::string fallback_gcode =
                 Slic3r::Test::slice({test_mesh}, fallback_config);
             const std::string cooldown =
@@ -64,18 +72,21 @@ SCENARIO("Minimize travel over printed areas", "[PrintedAreaTravel]") {
     }
 
     WHEN("A brim move would shortcut across an object footprint") {
-        auto config = Slic3r::DynamicPrintConfig::full_print_config_with(
-            {{"perimeters", 2}, {"fill_density", 15}, {"skirts", 0},
-             {"brim_width", 5}, {"layer_height", 0.4}, {"first_layer_height", 0.4}}
-        );
-        config.set_deserialize_strict({{"brim_type", "outer_and_inner"}});
+        Test::TestConfig direct_config;
+        direct_config.print.items.opt("perimeters").set(2);
+        direct_config.print.items.opt("fill_density").set(Percentage{15});
+        direct_config.print.items.opt("skirts").set(0);
+        direct_config.print.items.opt("brim_width").set(5.0);
+        direct_config.print.items.opt("layer_height").set(0.4);
+        direct_config.print.items.opt("first_layer_height").set(FloatOrPercentage{0.4});
+        direct_config.print.items.opt("brim_type").set(BrimType::OuterAndInner);
         const TriangleMesh test_mesh = Slic3r::Test::mesh(
             Slic3r::Test::TestMesh::cube_with_hole, Vec3d::Zero(), Vec3d(1., 1., 0.08));
 
-        const std::string direct_gcode = Slic3r::Test::slice({test_mesh}, config);
-        config.set_key_value(
-            "avoid_crossing_printed_areas", new Slic3r::ConfigOptionBool(true));
-        const std::string minimized_gcode = Slic3r::Test::slice({test_mesh}, config);
+        const std::string direct_gcode = Slic3r::Test::slice({test_mesh}, direct_config);
+        auto minimized_config = direct_config;
+        minimized_config.print.items.opt("avoid_crossing_printed_areas").set(true);
+        const std::string minimized_gcode = Slic3r::Test::slice({test_mesh}, minimized_config);
 
         auto brim_travel_segments = [](const std::string &gcode) {
             const size_t begin = gcode.find(";TYPE:Skirt/Brim");
@@ -85,10 +96,10 @@ SCENARIO("Minimize travel over printed areas", "[PrintedAreaTravel]") {
             const std::string brim_gcode = gcode.substr(begin, end - begin);
 
             size_t segments = 0;
-            Slic3r::GCodeReader parser;
+            GCodeReader parser;
             parser.parse_buffer(
                 brim_gcode,
-                [&segments](Slic3r::GCodeReader &reader, const Slic3r::GCodeReader::GCodeLine &line) {
+                [&segments](GCodeReader &reader, const GCodeReader::GCodeLine &line) {
                     if (!line.extruding(reader) && line.dist_XY(reader) > 0.)
                         ++segments;
                 }
